@@ -6,22 +6,34 @@ MVPは、画像を外部へ送信しないクライアントサイドWebアプ�
 
 本計画は [要件一覧](requirements.md) を実装可能な単位へ分解したものである。未決事項の確定や技術検証の結果により、各フェーズの開始前に更新する。
 
-## 2. 技術構成（初期案）
+## 2. 技術構成
 
 | 領域 | 選択 | 理由 |
 | --- | --- | --- |
 | UI | React + TypeScript | コンポーネント分割、型安全性、テスト容易性 |
-| ビルド | Vite | 静的クライアントアプリに必要十分で、開発起動が速い |
-| パッケージ管理 | Bun | インストールとCIを簡潔に統一できる |
+| 統合ツールチェーン | Vite+ | 開発、ビルド、整形、静的解析、型検査、テストを一貫したコマンドと設定に集約する |
+| パッケージ管理 | Bun（Vite+経由） | `packageManager` でバージョンを固定し、Vite+から一貫して操作する |
 | 変換 | Browser Canvas / Image APIs + 必要最小限のWASM codec | ネイティブ機能を優先し、未対応形式だけ補完する |
 | 並列処理 | Web Worker | 変換中もUIの応答性を保つ |
 | 状態管理 | Reactの標準機能を基本とする | MVPで依存関係と複雑性を増やさない |
-| 単体・結合テスト | Vitest + Testing Library | 変換ロジックとUI状態を高速に検証する |
+| 単体・結合テスト | Vite+ Test + Testing Library | Viteと共通の解決・変換設定でロジックとUI状態を検証する |
 | E2E | Playwright | 実ブラウザで主要フローとダウンロードを検証する |
-| CI | GitHub Actions | Pull Requestごとに品質検査を自動化する |
+| CI | GitHub Actions + setup-vp | Pull RequestごとにVite+と同じ品質検査を再現する |
 | 配信 | 静的ホスティング | サーバー処理を持たず、運用と攻撃面を小さくする |
 
-特定ライブラリへの依存は技術検証後に確定し、ブラウザ標準APIで満たせる範囲には追加しない。
+Vite+の採用判断は [ADR-0001](adr/0001-use-vite-plus.md) に記録する。Vite+とBunはプロジェクト内でバージョンを固定し、日常の操作は `vp` コマンドへ統一する。画像変換ライブラリは技術検証後に確定し、ブラウザ標準APIで満たせる範囲には追加しない。
+
+### 2.1 標準コマンド
+
+| 目的 | コマンド |
+| --- | --- |
+| 依存関係のインストール | `vp install` |
+| 開発サーバー | `vp dev` |
+| 整形・静的解析・型検査 | `vp check` |
+| 単体・結合テスト | `vp test` |
+| 本番ビルド | `vp build` |
+
+PlaywrightなどVite+の組み込みコマンド外の処理は、`vp run <task>` を入口とする。
 
 ## 3. アーキテクチャ
 
@@ -83,9 +95,11 @@ docs/                    # 要件・設計・運用資料
 
 目的: 最大の技術リスクを先に検証し、継続開発できる土台を作る。
 
-- [ ] React、TypeScript、Vite、Bunでプロジェクトを初期化する
-- [ ] formatter、linter、型検査、テストを設定する
-- [ ] GitHub Actionsで型検査、静的解析、単体テスト、ビルドを実行する
+- [ ] Vite+、React、TypeScript、Bunでプロジェクトを初期化する
+- [ ] Vite+とBunのバージョンをプロジェクト内で固定する
+- [ ] Vite+でformatter、linter、型検査、テストを設定する
+- [ ] GitHub Actionsへ `setup-vp` を導入し、`vp check`、`vp test`、`vp build` を実行する
+- [ ] React plugin、Web Worker、WASM、PlaywrightとVite+の組み合わせを検証する
 - [ ] JPEG、PNG、WebP、AVIFのdecode/encode可否を対象ブラウザで検証する
 - [ ] EXIF Orientation、透過、カラープロファイルの扱いを検証する
 - [ ] Web Workerへ画像データを渡し、変換・キャンセル・資源解放を試作する
@@ -210,6 +224,7 @@ docs/                    # 要件・設計・運用資料
 
 | リスク | 影響 | 対策 |
 | --- | --- | --- |
+| Vite+が0.x系で仕様変更の可能性がある | 設定変更、CI停止 | バージョン固定、更新用PRでの検証、通常のViteへ戻せる構成の維持 |
 | ブラウザごとにdecode/encode対応が異なる | 同じ形式でも利用できない | 起動時の機能検出、adapter分離、必要箇所のみWASMで補完 |
 | 大画像・大量画像でメモリが枯渇する | タブ停止、結果消失 | 事前検証、同時実行制御、逐次decode、明示的な資源解放 |
 | Canvas経由でメタデータや色が変わる | 見た目の差、情報消失 | 仕様を明示し、Orientation・ICCをfixtureで検証 |
@@ -220,6 +235,8 @@ docs/                    # 要件・設計・運用資料
 ## 7. 運用ルール
 
 - `main` は常にビルド・テスト可能な状態を保つ
+- ローカルとCIの標準入口を `vp` コマンドへ統一する
+- Vite+とBunの更新は機能変更から分離し、`vp check`、`vp test`、`vp build`、E2Eを確認する
 - 変更は小さなPull Request単位とし、要件IDを説明へ記載する
 - 新しい形式はadapter、fixture、対応表、エラー処理をセットで追加する
 - 要件変更は `docs/requirements.md`、技術判断は `docs/adr/` へ記録する
@@ -227,8 +244,8 @@ docs/                    # 要件・設計・運用資料
 
 ## 8. 最初の実装Pull Request候補
 
-1. `chore: initialize React TypeScript application`
-2. `ci: add quality checks`
+1. `chore: initialize Vite+ React TypeScript application`
+2. `ci: add Vite+ quality checks`
 3. `spike: validate browser image codec capabilities`
 4. `feat: add image input and validation`
 5. `feat: implement single image conversion worker`
