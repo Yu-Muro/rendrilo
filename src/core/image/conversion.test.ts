@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import { calculateOutputSize, normalizeBackgroundColor, normalizeQuality } from "./conversion.ts";
-import { createOutputFileName } from "./file-naming.ts";
+import { createOutputFileName, createUniqueOutputFileNames } from "./file-naming.ts";
 
 const resizeDefaults = {
   allowUpscale: false,
@@ -72,5 +72,11 @@ describe("createOutputFileName", () => {
 
   it("uses a safe fallback for an empty name", () => {
     expect(createOutputFileName(" ", "image/jpeg")).toBe("converted.jpg");
+  });
+
+  it("creates collision-safe names case-insensitively", () => {
+    expect(
+      createUniqueOutputFileNames(["photo.png", "photo.jpg", "PHOTO.webp"], "image/avif"),
+    ).toEqual(["photo.avif", "photo-2.avif", "PHOTO-3.avif"]);
   });
 });

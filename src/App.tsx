@@ -13,7 +13,7 @@ import {
   type OutputMimeType,
   type PixelSize,
 } from "./core/image/conversion.ts";
-import { createOutputFileName } from "./core/image/file-naming.ts";
+import { createUniqueOutputFileNames } from "./core/image/file-naming.ts";
 import { acceptedImageTypes, findInputFormat, inputFormats } from "./core/image/formats.ts";
 import {
   defaultInputLimits,
@@ -23,27 +23,35 @@ import {
 } from "./core/image/validation.ts";
 import type { ConversionProgress } from "./core/image/worker-protocol.ts";
 
-interface SelectedFile {
-  readonly file: File;
-  readonly id: string;
-}
-
 interface CompletedConversion {
+  readonly blob: Blob;
   readonly downloadName: string;
   readonly size: PixelSize;
   readonly url: string;
-  readonly bytes: number;
 }
 
-type ConversionState =
+type FileConversionState =
   | { readonly status: "idle" }
-  | { readonly progress: ConversionProgress; readonly status: "running" }
+  | { readonly status: "canceled" }
   | { readonly message: string; readonly status: "error" }
+  | { readonly progress: ConversionProgress; readonly status: "running" }
   | { readonly result: CompletedConversion; readonly status: "completed" };
+
+interface QueueEntry {
+  readonly file: File;
+  readonly id: string;
+  readonly state: FileConversionState;
+}
+
+interface ActiveRun {
+  canceled: boolean;
+  readonly id: string;
+  task?: ConversionTask;
+}
 
 const rejectionMessages: Record<RejectionCode, string> = {
   "empty-file": "is empty",
-  "file-count-exceeded": "exceeds the current one-image selection limit",
+  "file-count-exceeded": "exceeds the 100-image selection limit",
   "file-too-large": "is larger than 100 MB",
   "total-size-exceeded": "exceeds the 500 MB total limit",
   "unsupported-format": "uses an unsupported format",
@@ -51,73 +59,79 @@ const rejectionMessages: Record<RejectionCode, string> = {
 
 const progressLabels: Record<ConversionProgress, string> = {
   decoding: "Reading image…",
-  encoding: "Encoding result…",
-  rendering: "Rendering pixels…",
+  encoding: "Encoding…",
+  rendering: "Rendering…",
 };
 
-function createSelectedFile(file: File): SelectedFile {
-  return { file, id: crypto.randomUUID() };
+function createQueueEntry(file: File): QueueEntry {
+  return { file, id: crypto.randomUUID(), state: { status: "idle" } };
 }
 
 function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const clientRef = useRef<ConversionClient | null>(null);
-  const taskRef = useRef<ConversionTask | null>(null);
-  const resultUrlRef = useRef<string | null>(null);
+  const activeRunRef = useRef<ActiveRun | null>(null);
+  const resultUrlsRef = useRef(new Set<string>());
   const mountedRef = useRef(false);
-  const [selectedFile, setSelectedFile] = useState<SelectedFile | null>(null);
+  const [queue, setQueue] = useState<QueueEntry[]>([]);
   const [settings, setSettings] = useState<ConversionSettings>(defaultConversionSettings);
-  const [conversion, setConversion] = useState<ConversionState>({ status: "idle" });
   const [errors, setErrors] = useState<string[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [isRunning, setIsRunning] = useState(false);
 
   useEffect(() => {
     mountedRef.current = true;
     const client = new ConversionClient();
+    const resultUrls = resultUrlsRef.current;
     clientRef.current = client;
 
     return () => {
       mountedRef.current = false;
+      activeRunRef.current?.task?.cancel();
       client.dispose();
       clientRef.current = null;
 
-      if (resultUrlRef.current) {
-        URL.revokeObjectURL(resultUrlRef.current);
+      for (const url of resultUrls) {
+        URL.revokeObjectURL(url);
       }
+
+      resultUrls.clear();
     };
   }, []);
 
-  const releaseResult = () => {
-    if (resultUrlRef.current) {
-      URL.revokeObjectURL(resultUrlRef.current);
-      resultUrlRef.current = null;
-    }
-
-    setConversion({ status: "idle" });
+  const releaseUrl = (url: string) => {
+    URL.revokeObjectURL(url);
+    resultUrlsRef.current.delete(url);
   };
 
-  const cancelCurrentTask = () => {
-    taskRef.current?.cancel();
-    taskRef.current = null;
+  const releaseAllResults = () => {
+    for (const url of resultUrlsRef.current) {
+      URL.revokeObjectURL(url);
+    }
+
+    resultUrlsRef.current.clear();
+  };
+
+  const resetResults = () => {
+    releaseAllResults();
+    setQueue((current) => current.map((entry) => ({ ...entry, state: { status: "idle" } })));
+  };
+
+  const updateEntryState = (id: string, state: FileConversionState) => {
+    setQueue((current) => current.map((entry) => (entry.id === id ? { ...entry, state } : entry)));
   };
 
   const addFiles = (fileList: FileList | null) => {
-    if (!fileList?.length) {
+    if (!fileList?.length || isRunning) {
       return;
     }
 
-    const result = validateIncomingFiles([], Array.from(fileList), {
-      ...defaultInputLimits,
-      maxFileCount: 1,
-    });
-    const acceptedFile = result.accepted[0];
+    const result = validateIncomingFiles(
+      queue.map(({ file }) => file),
+      Array.from(fileList),
+    );
 
-    if (acceptedFile) {
-      cancelCurrentTask();
-      releaseResult();
-      setSelectedFile(createSelectedFile(acceptedFile));
-    }
-
+    setQueue((current) => [...current, ...result.accepted.map((file) => createQueueEntry(file))]);
     setErrors(
       result.rejected.map(
         ({ code, file }) => `${file.name || "Unnamed file"} ${rejectionMessages[code]}.`,
@@ -137,74 +151,141 @@ function App() {
   };
 
   const updateSettings = (patch: Partial<ConversionSettings>) => {
-    releaseResult();
+    if (isRunning) {
+      return;
+    }
+
+    resetResults();
     setSettings((current) => ({ ...current, ...patch }));
   };
 
-  const removeFile = () => {
-    cancelCurrentTask();
-    releaseResult();
+  const removeFile = (id: string) => {
+    if (isRunning) {
+      return;
+    }
+
+    setQueue((current) => {
+      const entry = current.find((item) => item.id === id);
+
+      if (entry?.state.status === "completed") {
+        releaseUrl(entry.state.result.url);
+      }
+
+      return current.filter((item) => item.id !== id);
+    });
+  };
+
+  const clearAll = () => {
+    if (isRunning) {
+      return;
+    }
+
+    releaseAllResults();
+    setQueue([]);
     setErrors([]);
-    setSelectedFile(null);
   };
 
   const startConversion = async () => {
     const client = clientRef.current;
 
-    if (!client || !selectedFile || conversion.status === "running") {
+    if (!client || queue.length === 0 || isRunning) {
       return;
     }
 
-    releaseResult();
-    setConversion({ progress: "decoding", status: "running" });
-    const task = client.convert(selectedFile.file, settings, (progress) => {
-      if (mountedRef.current) {
-        setConversion({ progress, status: "running" });
+    releaseAllResults();
+    setQueue((current) => current.map((entry) => ({ ...entry, state: { status: "idle" } })));
+    setIsRunning(true);
+
+    const run: ActiveRun = { canceled: false, id: crypto.randomUUID() };
+    const outputNames = createUniqueOutputFileNames(
+      queue.map(({ file }) => file.name),
+      settings.outputType,
+    );
+    activeRunRef.current = run;
+
+    for (const [index, entry] of queue.entries()) {
+      if (run.canceled || activeRunRef.current?.id !== run.id) {
+        break;
       }
-    });
-    taskRef.current = task;
 
-    try {
-      const result = await task.result;
-
-      if (!mountedRef.current || taskRef.current?.jobId !== task.jobId) {
-        return;
-      }
-
-      const url = URL.createObjectURL(result.blob);
-      resultUrlRef.current = url;
-      setConversion({
-        result: {
-          bytes: result.blob.size,
-          downloadName: createOutputFileName(selectedFile.file.name, settings.outputType),
-          size: result.size,
-          url,
-        },
-        status: "completed",
+      updateEntryState(entry.id, { progress: "decoding", status: "running" });
+      const task = client.convert(entry.file, settings, (progress) => {
+        if (mountedRef.current && activeRunRef.current?.id === run.id && !run.canceled) {
+          updateEntryState(entry.id, { progress, status: "running" });
+        }
       });
-    } catch (error) {
-      if (!mountedRef.current || taskRef.current?.jobId !== task.jobId) {
-        return;
-      }
+      run.task = task;
 
-      const message =
-        error instanceof ConversionTaskError
-          ? error.message
-          : "The image could not be converted unexpectedly.";
-      setConversion({ message, status: "error" });
-    } finally {
-      if (taskRef.current?.jobId === task.jobId) {
-        taskRef.current = null;
+      try {
+        const result = await task.result;
+
+        if (run.canceled || activeRunRef.current?.id !== run.id) {
+          updateEntryState(entry.id, { status: "canceled" });
+          break;
+        }
+
+        const url = URL.createObjectURL(result.blob);
+        resultUrlsRef.current.add(url);
+        updateEntryState(entry.id, {
+          result: {
+            blob: result.blob,
+            downloadName: outputNames[index] ?? "converted",
+            size: result.size,
+            url,
+          },
+          status: "completed",
+        });
+      } catch (error) {
+        if (!mountedRef.current || activeRunRef.current?.id !== run.id) {
+          return;
+        }
+
+        if (run.canceled || (error instanceof ConversionTaskError && error.code === "canceled")) {
+          updateEntryState(entry.id, { status: "canceled" });
+          break;
+        }
+
+        const message =
+          error instanceof ConversionTaskError
+            ? error.message
+            : "The image could not be converted unexpectedly.";
+        updateEntryState(entry.id, { message, status: "error" });
+      } finally {
+        run.task = undefined;
       }
     }
+
+    if (!mountedRef.current || activeRunRef.current?.id !== run.id) {
+      return;
+    }
+
+    if (run.canceled) {
+      setQueue((current) =>
+        current.map((entry) =>
+          entry.state.status === "idle" || entry.state.status === "running"
+            ? { ...entry, state: { status: "canceled" } }
+            : entry,
+        ),
+      );
+    }
+
+    activeRunRef.current = null;
+    setIsRunning(false);
   };
 
   const cancelConversion = () => {
-    taskRef.current?.cancel();
+    const run = activeRunRef.current;
+
+    if (run) {
+      run.canceled = true;
+      run.task?.cancel();
+    }
   };
 
   const outputFormat = findOutputFormat(settings.outputType);
   const showQuality = settings.outputType !== "image/png";
+  const totalSize = queue.reduce((total, { file }) => total + file.size, 0);
+  const completedCount = queue.filter(({ state }) => state.status === "completed").length;
 
   return (
     <div className="app-shell">
@@ -237,7 +318,7 @@ function App() {
 
         <section
           className={`drop-zone${isDragging ? " is-dragging" : ""}`}
-          onDragEnter={() => setIsDragging(true)}
+          onDragEnter={() => !isRunning && setIsDragging(true)}
           onDragLeave={() => setIsDragging(false)}
           onDragOver={(event) => event.preventDefault()}
           onDrop={handleDrop}
@@ -249,24 +330,29 @@ function App() {
             </svg>
           </div>
           <div>
-            <h2 id="upload-title">Drop an image here</h2>
-            <p>or choose one from your device</p>
+            <h2 id="upload-title">Drop your images here</h2>
+            <p>or choose them from your device</p>
           </div>
           <input
             ref={inputRef}
             hidden
             type="file"
             accept={acceptedImageTypes}
+            multiple
             onChange={handleInput}
+            disabled={isRunning}
           />
           <button
             className="primary-button"
             type="button"
             onClick={() => inputRef.current?.click()}
+            disabled={isRunning}
           >
-            Choose image
+            Choose images
           </button>
-          <p className="limits">Up to 100 MB · JPEG, PNG, WebP, AVIF</p>
+          <p className="limits">
+            Up to {defaultInputLimits.maxFileCount} files · 100 MB each · JPEG, PNG, WebP, AVIF
+          </p>
         </section>
 
         <div className="format-row" aria-label="Supported input formats">
@@ -286,35 +372,16 @@ function App() {
           ))}
         </div>
 
-        {selectedFile && (
+        {queue.length > 0 && (
           <section className="workspace" aria-labelledby="workspace-title">
             <div className="queue-heading">
               <div>
-                <p className="eyebrow">Ready</p>
-                <h2 id="workspace-title">Convert your image</h2>
+                <p className="eyebrow">Batch workspace</p>
+                <h2 id="workspace-title">Convert your images</h2>
               </div>
-              <div className="queue-summary">Processed locally</div>
-            </div>
-
-            <div className="selected-file">
-              <div className="file-symbol" aria-hidden="true">
-                {findInputFormat(selectedFile.file.type)?.label.slice(0, 1) ?? "?"}
+              <div className="queue-summary">
+                {queue.length} {queue.length === 1 ? "file" : "files"} · {formatBytes(totalSize)}
               </div>
-              <div className="file-details">
-                <strong>{selectedFile.file.name}</strong>
-                <span>
-                  {findInputFormat(selectedFile.file.type)?.label ?? "Unknown"} ·{" "}
-                  {formatBytes(selectedFile.file.size)}
-                </span>
-              </div>
-              <button
-                className="remove-button"
-                type="button"
-                onClick={removeFile}
-                aria-label={`Remove ${selectedFile.file.name}`}
-              >
-                Remove
-              </button>
             </div>
 
             <div className="settings-grid">
@@ -325,7 +392,7 @@ function App() {
                   onChange={(event) =>
                     updateSettings({ outputType: event.target.value as OutputMimeType })
                   }
-                  disabled={conversion.status === "running"}
+                  disabled={isRunning}
                 >
                   {outputFormats.map((format) => (
                     <option key={format.mimeType} value={format.mimeType}>
@@ -345,7 +412,7 @@ function App() {
                   max="100"
                   value={settings.quality}
                   onChange={(event) => updateSettings({ quality: event.target.valueAsNumber })}
-                  disabled={!showQuality || conversion.status === "running"}
+                  disabled={!showQuality || isRunning}
                 />
               </label>
 
@@ -362,7 +429,7 @@ function App() {
                         width: event.target.value ? event.target.valueAsNumber : undefined,
                       })
                     }
-                    disabled={conversion.status === "running"}
+                    disabled={isRunning}
                   />
                   <span>px</span>
                 </div>
@@ -381,7 +448,7 @@ function App() {
                         height: event.target.value ? event.target.valueAsNumber : undefined,
                       })
                     }
-                    disabled={conversion.status === "running"}
+                    disabled={isRunning}
                   />
                   <span>px</span>
                 </div>
@@ -396,7 +463,7 @@ function App() {
                   onChange={(event) =>
                     updateSettings({ preserveAspectRatio: event.target.checked })
                   }
-                  disabled={conversion.status === "running"}
+                  disabled={isRunning}
                 />
                 Keep aspect ratio
               </label>
@@ -405,7 +472,7 @@ function App() {
                   type="checkbox"
                   checked={settings.allowUpscale}
                   onChange={(event) => updateSettings({ allowUpscale: event.target.checked })}
-                  disabled={conversion.status === "running"}
+                  disabled={isRunning}
                 />
                 Allow upscaling
               </label>
@@ -416,55 +483,73 @@ function App() {
                     type="color"
                     value={settings.backgroundColor}
                     onChange={(event) => updateSettings({ backgroundColor: event.target.value })}
-                    disabled={conversion.status === "running"}
+                    disabled={isRunning}
                   />
                 </label>
               )}
             </div>
 
+            <ul className="file-list" aria-label="Conversion queue">
+              {queue.map((entry) => (
+                <li className="file-item" key={entry.id}>
+                  <div className="file-symbol" aria-hidden="true">
+                    {findInputFormat(entry.file.type)?.label.slice(0, 1) ?? "?"}
+                  </div>
+                  <div className="file-details">
+                    <strong>{entry.file.name}</strong>
+                    <span>
+                      {findInputFormat(entry.file.type)?.label ?? "Unknown"} ·{" "}
+                      {formatBytes(entry.file.size)}
+                    </span>
+                    <FileStatus state={entry.state} />
+                  </div>
+                  <div className="file-actions">
+                    {entry.state.status === "completed" && (
+                      <a
+                        className="file-download"
+                        href={entry.state.result.url}
+                        download={entry.state.result.downloadName}
+                      >
+                        Download
+                      </a>
+                    )}
+                    <button
+                      className="remove-button"
+                      type="button"
+                      onClick={() => removeFile(entry.id)}
+                      aria-label={`Remove ${entry.file.name}`}
+                      disabled={isRunning}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+
             <div className="conversion-actions" aria-live="polite">
-              {conversion.status === "running" ? (
+              {isRunning ? (
                 <>
                   <p className="conversion-status">
                     <span className="spinner" aria-hidden="true" />
-                    {progressLabels[conversion.progress]}
+                    Converting {completedCount} of {queue.length}
                   </p>
                   <button className="secondary-button" type="button" onClick={cancelConversion}>
-                    Cancel
+                    Cancel batch
                   </button>
                 </>
               ) : (
-                <button className="primary-button" type="button" onClick={startConversion}>
-                  Convert to {outputFormat?.label ?? "image"}
-                </button>
+                <>
+                  <button className="primary-button" type="button" onClick={startConversion}>
+                    Convert {queue.length} {queue.length === 1 ? "image" : "images"} to{" "}
+                    {outputFormat?.label ?? "image"}
+                  </button>
+                  <button className="secondary-button" type="button" onClick={clearAll}>
+                    Clear all
+                  </button>
+                </>
               )}
             </div>
-
-            {conversion.status === "error" && (
-              <p className="error-message conversion-error" role="alert">
-                {conversion.message}
-              </p>
-            )}
-
-            {conversion.status === "completed" && (
-              <div className="result-panel">
-                <div>
-                  <p className="eyebrow">Complete</p>
-                  <strong>{conversion.result.downloadName}</strong>
-                  <span>
-                    {conversion.result.size.width} × {conversion.result.size.height} ·{" "}
-                    {formatBytes(conversion.result.bytes)}
-                  </span>
-                </div>
-                <a
-                  className="download-button"
-                  href={conversion.result.url}
-                  download={conversion.result.downloadName}
-                >
-                  Download
-                </a>
-              </div>
-            )}
           </section>
         )}
       </main>
@@ -475,6 +560,35 @@ function App() {
         </p>
       </footer>
     </div>
+  );
+}
+
+function FileStatus({ state }: { readonly state: FileConversionState }) {
+  if (state.status === "idle") {
+    return <span className="file-status">Waiting</span>;
+  }
+
+  if (state.status === "running") {
+    return <span className="file-status is-running">{progressLabels[state.progress]}</span>;
+  }
+
+  if (state.status === "canceled") {
+    return <span className="file-status">Canceled</span>;
+  }
+
+  if (state.status === "error") {
+    return (
+      <span className="file-status is-error" role="alert">
+        {state.message}
+      </span>
+    );
+  }
+
+  return (
+    <span className="file-status is-complete">
+      {state.result.downloadName} · {state.result.size.width} × {state.result.size.height} ·{" "}
+      {formatBytes(state.result.blob.size)}
+    </span>
   );
 }
 

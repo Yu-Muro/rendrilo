@@ -13,3 +13,27 @@ export function createOutputFileName(originalName: string, outputType: OutputMim
 
   return `${baseName || "converted"}.${format.extension}`;
 }
+
+export function createUniqueOutputFileNames(
+  originalNames: readonly string[],
+  outputType: OutputMimeType,
+): string[] {
+  const usedNames = new Set<string>();
+
+  return originalNames.map((originalName) => {
+    const initialName = createOutputFileName(originalName, outputType);
+    const extensionIndex = initialName.lastIndexOf(".");
+    const baseName = initialName.slice(0, extensionIndex);
+    const extension = initialName.slice(extensionIndex);
+    let candidate = initialName;
+    let suffix = 2;
+
+    while (usedNames.has(candidate.toLowerCase())) {
+      candidate = `${baseName}-${suffix}${extension}`;
+      suffix += 1;
+    }
+
+    usedNames.add(candidate.toLowerCase());
+    return candidate;
+  });
+}
