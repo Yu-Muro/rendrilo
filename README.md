@@ -4,10 +4,33 @@ Universal Image Converter — ブラウザ内で画像を安全かつ手軽に�
 
 ## Status
 
-現在は要件定義・実装計画の段階です。
+現在はMVPの基盤実装段階です。
 
 - [要件一覧](docs/requirements.md)
 - [実装プラン](docs/implementation-plan.md)
+
+## Development
+
+### Prerequisites
+
+- [Vite+](https://viteplus.dev/guide/)
+
+Vite+がプロジェクトで指定されたNode.jsとBunを管理します。
+
+### Commands
+
+```sh
+vp install
+vp dev
+```
+
+品質チェック、テスト、ビルドは次のコマンドで実行します。
+
+```sh
+vp check
+vp test --run
+vp build
+```
 
 ## Product principles
 

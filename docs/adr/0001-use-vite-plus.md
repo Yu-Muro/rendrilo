@@ -15,7 +15,7 @@ rendrilo はReactとTypeScriptで新規開発するクライアントサイドWe
 
 - UIはReact + TypeScriptとする
 - 開発、整形、静的解析、型検査、テスト、ビルドの入口を `vp` に統一する
-- パッケージ管理にはBunを使用し、Vite+経由で操作する
+- パッケージ管理にはBunを使用し、Vite+のプロジェクトメタデータで固定してVite+経由で操作する
 - Vite+とBunのバージョンをプロジェクト内で固定する
 - CIでは公式の `setup-vp` GitHub Actionを利用する
 - Playwrightなど組み込み外のタスクは `vp run` から実行する
