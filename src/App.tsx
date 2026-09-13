@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent, DragEvent } from "react";
+import { createZipArchive, type ZipProgress } from "./core/archive/create-zip.ts";
 import {
   ConversionClient,
   ConversionTaskError,
@@ -49,6 +50,12 @@ interface ActiveRun {
   task?: ConversionTask;
 }
 
+type ZipState =
+  | { readonly status: "idle" }
+  | { readonly progress: ZipProgress; readonly status: "creating" }
+  | { readonly message: string; readonly status: "error" }
+  | { readonly bytes: number; readonly url: string; readonly status: "ready" };
+
 const rejectionMessages: Record<RejectionCode, string> = {
   "empty-file": "is empty",
   "file-count-exceeded": "exceeds the 100-image selection limit",
@@ -72,12 +79,14 @@ function App() {
   const clientRef = useRef<ConversionClient | null>(null);
   const activeRunRef = useRef<ActiveRun | null>(null);
   const resultUrlsRef = useRef(new Set<string>());
+  const zipUrlRef = useRef<string | null>(null);
   const mountedRef = useRef(false);
   const [queue, setQueue] = useState<QueueEntry[]>([]);
   const [settings, setSettings] = useState<ConversionSettings>(defaultConversionSettings);
   const [errors, setErrors] = useState<string[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
+  const [zipState, setZipState] = useState<ZipState>({ status: "idle" });
 
   useEffect(() => {
     mountedRef.current = true;
@@ -96,8 +105,21 @@ function App() {
       }
 
       resultUrls.clear();
+
+      if (zipUrlRef.current) {
+        URL.revokeObjectURL(zipUrlRef.current);
+      }
     };
   }, []);
+
+  const resetZip = () => {
+    if (zipUrlRef.current) {
+      URL.revokeObjectURL(zipUrlRef.current);
+      zipUrlRef.current = null;
+    }
+
+    setZipState({ status: "idle" });
+  };
 
   const releaseUrl = (url: string) => {
     URL.revokeObjectURL(url);
@@ -114,6 +136,7 @@ function App() {
 
   const resetResults = () => {
     releaseAllResults();
+    resetZip();
     setQueue((current) => current.map((entry) => ({ ...entry, state: { status: "idle" } })));
   };
 
@@ -164,6 +187,7 @@ function App() {
       return;
     }
 
+    resetZip();
     setQueue((current) => {
       const entry = current.find((item) => item.id === id);
 
@@ -181,6 +205,7 @@ function App() {
     }
 
     releaseAllResults();
+    resetZip();
     setQueue([]);
     setErrors([]);
   };
@@ -193,6 +218,7 @@ function App() {
     }
 
     releaseAllResults();
+    resetZip();
     setQueue((current) => current.map((entry) => ({ ...entry, state: { status: "idle" } })));
     setIsRunning(true);
 
@@ -279,6 +305,53 @@ function App() {
     if (run) {
       run.canceled = true;
       run.task?.cancel();
+    }
+  };
+
+  const prepareZipDownload = async () => {
+    if (zipState.status === "creating") {
+      return;
+    }
+
+    const completedEntries = queue.flatMap((entry) =>
+      entry.state.status === "completed"
+        ? [
+            {
+              blob: entry.state.result.blob,
+              name: entry.state.result.downloadName,
+            },
+          ]
+        : [],
+    );
+
+    if (completedEntries.length === 0) {
+      return;
+    }
+
+    resetZip();
+    setZipState({
+      progress: { completed: 0, total: completedEntries.length },
+      status: "creating",
+    });
+
+    try {
+      const archive = await createZipArchive(completedEntries, (progress) => {
+        if (mountedRef.current) {
+          setZipState({ progress, status: "creating" });
+        }
+      });
+
+      if (!mountedRef.current) {
+        return;
+      }
+
+      const url = URL.createObjectURL(archive);
+      zipUrlRef.current = url;
+      setZipState({ bytes: archive.size, status: "ready", url });
+    } catch {
+      if (mountedRef.current) {
+        setZipState({ message: "The ZIP archive could not be created.", status: "error" });
+      }
     }
   };
 
@@ -550,6 +623,42 @@ function App() {
                 </>
               )}
             </div>
+
+            {completedCount > 1 && !isRunning && (
+              <div className="zip-panel" aria-live="polite">
+                <div>
+                  <p className="eyebrow">Batch download</p>
+                  <strong>Save {completedCount} converted images together</strong>
+                  {zipState.status === "creating" && (
+                    <span>
+                      Adding {zipState.progress.completed} of {zipState.progress.total} files…
+                    </span>
+                  )}
+                  {zipState.status === "ready" && (
+                    <span>ZIP ready · {formatBytes(zipState.bytes)}</span>
+                  )}
+                  {zipState.status === "error" && (
+                    <span className="is-error" role="alert">
+                      {zipState.message}
+                    </span>
+                  )}
+                </div>
+                {zipState.status === "ready" ? (
+                  <a className="download-button" href={zipState.url} download="rendrilo-images.zip">
+                    Download ZIP
+                  </a>
+                ) : (
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={prepareZipDownload}
+                    disabled={zipState.status === "creating"}
+                  >
+                    {zipState.status === "creating" ? "Preparing…" : "Prepare ZIP"}
+                  </button>
+                )}
+              </div>
+            )}
           </section>
         )}
       </main>
