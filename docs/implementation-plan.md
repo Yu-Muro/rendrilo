@@ -12,7 +12,7 @@ MVPは、画像を外部へ送信しないクライアントサイドWebアプ�
 | ------------------ | ---------------------------------------------------- | ------------------------------------------------------------------------------ |
 | UI                 | React + TypeScript                                   | コンポーネント分割、型安全性、テスト容易性                                     |
 | 統合ツールチェーン | Vite+                                                | 開発、ビルド、整形、静的解析、型検査、テストを一貫したコマンドと設定に集約する |
-| パッケージ管理     | Bun（Vite+経由）                                     | プロジェクトメタデータでバージョンを固定し、Vite+から一貫して操作する          |
+| パッケージ管理     | Vite+ Package Management                             | 利用者の操作を `vp` に統一し、内部のパッケージマネージャーもVite+で管理する    |
 | 変換               | Browser Canvas / Image APIs + 必要最小限のWASM codec | ネイティブ機能を優先し、未対応形式だけ補完する                                 |
 | 並列処理           | Web Worker                                           | 変換中もUIの応答性を保つ                                                       |
 | 状態管理           | Reactの標準機能を基本とする                          | MVPで依存関係と複雑性を増やさない                                              |
@@ -21,19 +21,24 @@ MVPは、画像を外部へ送信しないクライアントサイドWebアプ�
 | CI                 | GitHub Actions + setup-vp                            | Pull RequestごとにVite+と同じ品質検査を再現する                                |
 | 配信               | 静的ホスティング                                     | サーバー処理を持たず、運用と攻撃面を小さくする                                 |
 
-Vite+の採用判断は [ADR-0001](adr/0001-use-vite-plus.md) に記録する。Vite+とBunはプロジェクト内でバージョンを固定し、日常の操作は `vp` コマンドへ統一する。画像変換ライブラリは技術検証後に確定し、ブラウザ標準APIで満たせる範囲には追加しない。
+Vite+の採用判断は [ADR-0001](adr/0001-use-vite-plus.md) に記録する。Vite+、Node.js、Vite+が内部で使用するパッケージマネージャーはプロジェクト内でバージョンを固定し、日常の操作は `vp` コマンドへ統一する。画像変換ライブラリは技術検証後に確定し、ブラウザ標準APIで満たせる範囲には追加しない。
 
 ### 2.1 標準コマンド
 
-| 目的                   | コマンド     |
-| ---------------------- | ------------ |
-| 依存関係のインストール | `vp install` |
-| 開発サーバー           | `vp dev`     |
-| 整形・静的解析・型検査 | `vp check`   |
-| 単体・結合テスト       | `vp test`    |
-| 本番ビルド             | `vp build`   |
+| 目的                   | コマンド              |
+| ---------------------- | --------------------- |
+| 依存関係のインストール | `vp install`          |
+| 依存関係の追加         | `vp add <package>`    |
+| 開発依存関係の追加     | `vp add -D <package>` |
+| 依存関係の削除         | `vp remove <package>` |
+| 依存関係の更新確認     | `vp outdated`         |
+| 依存理由の調査         | `vp why <package>`    |
+| 開発サーバー           | `vp dev`              |
+| 整形・静的解析・型検査 | `vp check`            |
+| 単体・結合テスト       | `vp test`             |
+| 本番ビルド             | `vp build`            |
 
-PlaywrightなどVite+の組み込みコマンド外の処理は、`vp run <task>` を入口とする。
+Vite+の組み込みコマンドと同名の `package.json` scriptsは定義しない。PlaywrightなどVite+の組み込みコマンド外の処理は `vite.config.ts` のタスクへ集約し、`vp run <task>` を入口とする。正規化されたVite+コマンドにないパッケージマネージャー固有操作が必要な場合に限り、`vp pm <command>` を使用する。
 
 ## 3. アーキテクチャ
 
@@ -95,8 +100,9 @@ docs/                    # 要件・設計・運用資料
 
 目的: 最大の技術リスクを先に検証し、継続開発できる土台を作る。
 
-- [x] Vite+、React、TypeScript、Bunでプロジェクトを初期化する
-- [x] Vite+とBunのバージョンをプロジェクト内で固定する
+- [x] Vite+、React、TypeScriptでプロジェクトを初期化する
+- [x] Vite+、Node.js、内部パッケージマネージャーのバージョンをプロジェクト内で固定する
+- [x] 依存関係の操作を `vp install`、`vp add`、`vp remove` などのVite+コマンドへ統一する
 - [x] Vite+でformatter、linter、型検査、テストを設定する
 - [x] GitHub Actionsへ `setup-vp` を導入し、`vp check`、`vp test`、`vp build` を実行する
 - [ ] React plugin、Web Worker、WASM、PlaywrightとVite+の組み合わせを検証する
@@ -236,7 +242,7 @@ docs/                    # 要件・設計・運用資料
 
 - `main` は常にビルド・テスト可能な状態を保つ
 - ローカルとCIの標準入口を `vp` コマンドへ統一する
-- Vite+とBunの更新は機能変更から分離し、`vp check`、`vp test`、`vp build`、E2Eを確認する
+- Vite+、Node.js、内部パッケージマネージャーの更新は機能変更から分離し、`vp check`、`vp test`、`vp build`、E2Eを確認する
 - 変更は小さなPull Request単位とし、要件IDを説明へ記載する
 - 新しい形式はadapter、fixture、対応表、エラー処理をセットで追加する
 - 要件変更は `docs/requirements.md`、技術判断は `docs/adr/` へ記録する
