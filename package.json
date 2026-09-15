@@ -3,13 +3,6 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "scripts": {
-    "dev": "vp dev",
-    "check": "vp check",
-    "test": "vp test --run",
-    "build": "vp build",
-    "preview": "vp preview"
-  },
   "dependencies": {
     "fflate": "^0.8.3",
     "react": "^19.2.8",

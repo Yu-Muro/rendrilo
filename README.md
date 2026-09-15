@@ -15,13 +15,24 @@ Universal Image Converter — ブラウザ内で画像を安全かつ手軽に�
 
 - [Vite+](https://viteplus.dev/guide/)
 
-Vite+がプロジェクトで指定されたNode.jsとBunを管理します。
+Vite+がNode.jsと、内部で使用するパッケージマネージャーをプロジェクト指定のバージョンで管理します。開発者は直接 `bun`、`npm`、`pnpm`、`yarn` を呼ばず、依存関係を含む日常の操作を `vp` に統一します。
 
 ### Commands
 
 ```sh
 vp install
 vp dev
+```
+
+依存関係の追加・削除・更新・調査もVite+から実行します。
+
+```sh
+vp add <package>
+vp add -D <package>
+vp remove <package>
+vp update
+vp outdated
+vp why <package>
 ```
 
 品質チェック、テスト、ビルドは次のコマンドで実行します。
@@ -31,6 +42,8 @@ vp check
 vp test --run
 vp build
 ```
+
+`vp dev`、`vp check`、`vp test`、`vp build`、`vp preview` はVite+の組み込みコマンドです。同名の `package.json` scriptsは定義しません。組み込み外のタスクを追加する場合は、`vite.config.ts` に定義して `vp run <task>` から実行します。
 
 ## Product principles
 
